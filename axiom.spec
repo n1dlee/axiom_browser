@@ -43,9 +43,6 @@ a = Analysis(
         # Trim unused heavy stdlib modules
         "tkinter",
         "unittest",
-        "email",
-        "html",        # not needed — Qt handles HTML
-        "http",
         "xmlrpc",
         "pydoc",
     ],
