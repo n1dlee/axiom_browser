@@ -26,7 +26,7 @@ wheels/
 htmlcov/
 .tox/
 
-# ── IDE ───────────────────────────────────────────────────────────────────────
+# ── IDE / editor ──────────────────────────────────────────────────────────────
 .idea/
 .vscode/
 *.sublime-project
@@ -37,14 +37,17 @@ htmlcov/
 Thumbs.db
 desktop.ini
 
+# ── Claude Code local settings (machine-specific) ────────────────────────────
+.claude/
+
 # ── AXIOM user data (never commit personal browsing data) ─────────────────────
-# These are created at runtime in %APPDATA%\Axiom\ — not in the repo, but
-# guard against accidental inclusion if someone runs from a custom data dir.
 *.db
 *.db-shm
 *.db-wal
 profile/
 axiom_profile/
 
-# ── PyInstaller build artifacts ───────────────────────────────────────────────
-*.spec
+# ── PyInstaller — exclude build artifacts but KEEP the spec file ───────────────
+build/
+dist/
+# axiom.spec is intentionally tracked (needed to reproduce the build)
