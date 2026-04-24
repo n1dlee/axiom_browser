@@ -1,240 +1,82 @@
+"""
+AXIOM Adblock — domain-level request interceptor.
+
+Blocklist loading order
+-----------------------
+1. ``core/blocklist.txt`` alongside this module — the primary, user-editable
+   list.  Lines starting with ``#`` are comments; all others are bare hostnames.
+2. Built-in ``_FALLBACK_BLOCKLIST`` frozenset — used if the file is missing or
+   unreadable (e.g. packaged executable without the file).
+
+Allowlist
+---------
+Per-domain overrides can be added at runtime (not persisted to disk yet):
+
+    interceptor.add_to_allowlist("example.com")
+    interceptor.remove_from_allowlist("example.com")
+
+An allowed host and all its subdomains bypass the blocklist entirely.
+"""
+
+import logging
+from pathlib import Path
+
 from PyQt6.QtWebEngineCore import QWebEngineUrlRequestInterceptor, QWebEngineUrlRequestInfo
 
+_log = logging.getLogger(__name__)
+
+# Path to the external list, resolved relative to this source file so it works
+# from both the repo root and a PyInstaller bundle (adjust _BLOCKLIST_PATH in
+# the .spec if bundling).
+_BLOCKLIST_PATH = Path(__file__).with_name("blocklist.txt")
+
 # ---------------------------------------------------------------------------
-# Curated domain blocklist (~500 entries).
-# Sources: EasyList, EasyPrivacy, AdGuard DNS blocklist — well-known domains only.
+# Minimal embedded fallback (used only when blocklist.txt is absent/unreadable)
 # ---------------------------------------------------------------------------
-_BLOCKLIST: frozenset[str] = frozenset({
-    # Google advertising
+_FALLBACK_BLOCKLIST: frozenset[str] = frozenset({
     "doubleclick.net", "googleadservices.com", "googlesyndication.com",
-    "googletagmanager.com", "googletagservices.com", "google-analytics.com",
-    "analytics.google.com", "adservice.google.com", "pagead2.googlesyndication.com",
-    "ads.google.com", "adwords.google.com", "ad.doubleclick.net",
-    # Facebook / Meta
-    "connect.facebook.net", "graph.facebook.com", "an.facebook.com",
-    "pixel.facebook.com", "www.facebook.com/tr", "static.xx.fbcdn.net",
-    "analytics.facebook.com",
-    # Amazon advertising
-    "aax.amazon-adsystem.com", "fls-na.amazon.com",
-    "amazon-adsystem.com", "associates-amazon.com",
-    # Microsoft / Bing ads
-    "bat.bing.com", "ads.microsoft.com", "clarity.ms",
-    "c.clarity.ms", "a.clarity.ms",
-    # Twitter / X ads
-    "ads-api.twitter.com", "ads-twitter.com", "t.co",
-    "analytics.twitter.com", "static.ads-twitter.com",
-    # AppNexus / Xandr
-    "ib.adnxs.com", "nym1.ib.adnxs.com", "secure.adnxs.com",
-    # Rubicon / Magnite
-    "rubiconproject.com", "fastlane.rubiconproject.com",
-    "pixel.rubiconproject.com",
-    # Index Exchange
-    "casalemedia.com", "indexww.com",
-    # OpenX
-    "openx.net", "ads.openx.net",
-    # PubMatic
-    "pubmatic.com", "ads.pubmatic.com",
-    # Criteo
-    "criteo.com", "dis.criteo.com", "static.criteo.net",
-    "gum.criteo.com", "bidder.criteo.com",
-    # Taboola
-    "taboola.com", "cdn.taboola.com", "trc.taboola.com",
-    "nr-data.taboola.com",
-    # Outbrain
-    "outbrain.com", "outbrainimg.com", "widgets.outbrain.com",
-    # Yahoo advertising
-    "ads.yahoo.com", "analytics.yahoo.com", "yimg.com",
-    "pixel.advertising.com", "advertising.com",
-    # AOL / Oath
-    "oath.com", "ads.aol.com",
-    # AdRoll
-    "adroll.com", "d.adroll.com", "s.adroll.com",
-    # Scorecard Research
-    "scorecardresearch.com", "beacon.scorecardresearch.com",
-    # Quantcast
-    "quantserve.com", "pixel.quantserve.com",
-    # comScore
-    "comscore.com", "b.scorecardresearch.com",
-    # Nielsen
-    "imrworldwide.com", "cdn.imrworldwide.com",
-    # Hotjar
-    "hotjar.com", "static.hotjar.com", "vars.hotjar.com",
-    "insights.hotjar.com",
-    # Mixpanel
-    "mixpanel.com", "api.mixpanel.com", "cdn.mxpnl.com",
-    # Segment
-    "segment.com", "api.segment.io", "cdn.segment.com",
-    # Amplitude
-    "amplitude.com", "api.amplitude.com", "cdn.amplitude.com",
-    # Heap
-    "heap.io", "heapanalytics.com",
-    # FullStory
-    "fullstory.com", "rs.fullstory.com", "edge.fullstory.com",
-    # LogRocket
-    "logrocket.com", "r.lr-ingest.io",
-    # Mouseflow
-    "mouseflow.com", "a.mouseflow.com",
-    # Lucky Orange
-    "luckyorange.com", "cs.luckyorange.net",
-    # Crazy Egg
-    "crazyegg.com", "script.crazyegg.com",
-    # Intercom (analytics endpoints)
-    "intercom.io", "widget.intercom.io",
-    # Drift
-    "drift.com", "js.driftt.com",
-    # HubSpot analytics
-    "js.hs-analytics.net", "js.hs-scripts.com", "hs-banner.com",
-    "forms.hsforms.com", "track.hubspot.com",
-    # Marketo
-    "munchkin.marketo.net",
-    # Pardot
-    "pi.pardot.com",
-    # Salesforce analytics
-    "analytics.salesforce.com",
-    # TikTok ads
-    "analytics.tiktok.com", "ads.tiktok.com", "business-api.tiktok.com",
-    # Snapchat ads
-    "sc-static.net", "tr.snapchat.com",
-    # Pinterest analytics
-    "analytics.pinterest.com", "ct.pinterest.com",
-    # LinkedIn ads
-    "ads.linkedin.com", "px.ads.linkedin.com", "analytics.pointdrive.linkedin.com",
-    # TradeDesk
-    "adsrvr.org", "match.adsrvr.org",
-    # Liveramp
-    "rlcdn.com",
-    # MediaMath
-    "mathtag.com", "pixel.mathtag.com",
-    # Sonobi
-    "mtrx.com",
-    # Sizmek
-    "sizmek.com", "serving-sys.com",
-    # Spotxchange
-    "spotxchange.com",
-    # Smart AdServer
-    "smartadserver.com", "ced.sascdn.com",
-    # Undertone
-    "undertone.com",
-    # Sharethrough
-    "sharethrough.com",
-    # Triplelift
-    "triplelift.com",
-    # Sovrn
-    "lijit.com", "sovrn.com",
-    # GumGum
-    "gumgum.com",
-    # Conversant
-    "conversantmedia.com", "dotomi.com",
-    # Bidswitch
-    "bidswitch.net",
-    # Smaato
-    "smaato.net",
-    # InMobi
-    "inmobi.com",
-    # Verizon Media
-    "verizonmedia.com", "yap.yahoo.com",
-    # Exponential
-    "exponential.com", "tribalfusion.com",
-    # 33Across
-    "33across.com",
-    # District M
-    "districtm.net", "districtm.io",
-    # Lotame
-    "crwdcntrl.net",
-    # Eyeota
-    "eyeota.net",
-    # Bombora
-    "bombora.com",
-    # Neustar
-    "txnxn.com", "neustar.biz",
-    # Audience Science
-    "audiencescience.com",
-    # LiveIntent
-    "liadm.com",
-    # E-Planning
-    "e-planning.net",
-    # Improve Digital
-    "improvedigital.com",
-    # Yieldmo
-    "yieldmo.com",
-    # Kargo
-    "kargo.com",
-    # ContextWeb
-    "contextweb.com",
-    # Conversant / ValueClick
-    "valueclick.com", "valueclick.net",
-    # Conversant Media
-    "fastclick.net",
-    # Reklamstore
-    "reklamstore.com",
-    # Chartbeat
-    "chartbeat.com", "chartbeat.net", "static.chartbeat.com",
-    # Parse.ly
-    "parsely.com", "p1.parsely.com",
-    # SimpleReach
-    "simplereach.com",
-    # Disqus (advertising components)
-    "disqusads.com",
-    # OnScroll / Viglink
-    "viglink.com",
-    # Skimlinks
-    "skimlinks.com", "skimresources.com",
-    # Impact Radius
-    "impact.com", "d.impactradius-event.com",
-    # CJ Affiliate
-    "emjcd.com",
-    # ShareASale
-    "shareasale.com",
-    # Awin
-    "awin1.com",
-    # Commission Junction
-    "qksrv.net",
-    # RevenueHits
-    "revenuehits.com",
-    # PopAds
-    "popads.net",
-    # Adsterra
-    "adsterra.com",
-    # Propeller Ads
-    "propellerads.com",
-    # Traffic Junky
-    "trafficjunky.net",
-    # ExoClick
-    "exoclick.com",
-    # AdCash
-    "adcash.com",
-    # Adform
-    "adform.net", "track.adform.net",
-    # Zedo
-    "zedo.com",
-    # Yieldlab
-    "yieldlab.net",
-    # Effective Measure
-    "effectivemeasure.net",
-    # Trackonomics
-    "trackonomics.net",
-    # Moat analytics
-    "moat.com", "moatads.com",
-    # Evidon
-    "evidon.com",
-    # Ghostery
-    "ghostery.com",  # tracker, not the extension
-    # TrustArc
-    "consent.trustarc.com",
-    # OneTrust
-    "onetrust.com",
-    # Didomi
-    "didomi.io",
-    # Quantcast consent
-    "quantcast.mgr.consensu.org",
-    # Additional tracker domains
-    "cdn.speedcurve.com", "rum-static.pingdom.net",
-    "bam.nr-data.net", "js-agent.newrelic.com",
-    "collector.newrelic.com",
+    "google-analytics.com", "googletagmanager.com", "adservice.google.com",
+    "connect.facebook.net", "pixel.facebook.com", "analytics.facebook.com",
+    "amazon-adsystem.com", "bat.bing.com", "clarity.ms",
+    "scorecardresearch.com", "quantserve.com", "comscore.com",
+    "hotjar.com", "mixpanel.com", "amplitude.com", "segment.com",
+    "criteo.com", "taboola.com", "outbrain.com", "pubmatic.com",
+    "rubiconproject.com", "openx.net", "ib.adnxs.com",
 })
 
 
+def _load_blocklist() -> frozenset[str]:
+    """Load domains from *blocklist.txt*; fall back to the embedded set."""
+    try:
+        if _BLOCKLIST_PATH.is_file():
+            domains: set[str] = set()
+            with _BLOCKLIST_PATH.open("r", encoding="utf-8") as fh:
+                for raw in fh:
+                    line = raw.strip()
+                    if line and not line.startswith("#"):
+                        domains.add(line.lower())
+            _log.debug(
+                "AdBlock: loaded %d domains from %s", len(domains), _BLOCKLIST_PATH
+            )
+            return frozenset(domains)
+    except OSError as exc:
+        _log.warning(
+            "AdBlock: could not read %s (%s) — using built-in fallback list.",
+            _BLOCKLIST_PATH, exc,
+        )
+    return _FALLBACK_BLOCKLIST
+
+
+# Module-level load happens once at import time (O(1) per request thereafter).
+_BLOCKLIST: frozenset[str] = _load_blocklist()
+
+
+# ---------------------------------------------------------------------------
+# Host extraction helpers
+# ---------------------------------------------------------------------------
+
 def _extract_host(url: str) -> str:
+    """Return the bare lowercase hostname from *url*, or ``""`` on error."""
     try:
         no_scheme = url.split("://", 1)[-1]
         host = no_scheme.split("/")[0].split("?")[0].split(":")[0].lower()
@@ -243,38 +85,62 @@ def _extract_host(url: str) -> str:
         return ""
 
 
-def _is_blocked(host: str) -> bool:
-    if host in _BLOCKLIST:
+def _is_blocked(host: str, blocklist: frozenset[str]) -> bool:
+    """Return True if *host* or any of its parent domains is in *blocklist*."""
+    if host in blocklist:
         return True
     parts = host.split(".")
     for i in range(1, len(parts) - 1):
-        parent = ".".join(parts[i:])
-        if parent in _BLOCKLIST:
+        if ".".join(parts[i:]) in blocklist:
             return True
     return False
 
 
+def _is_allowed(host: str, allowlist: frozenset[str]) -> bool:
+    """Return True if *host* or any of its parent domains is in *allowlist*."""
+    if host in allowlist:
+        return True
+    parts = host.split(".")
+    for i in range(1, len(parts) - 1):
+        if ".".join(parts[i:]) in allowlist:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Interceptor
+# ---------------------------------------------------------------------------
+
 class AdBlockInterceptor(QWebEngineUrlRequestInterceptor):
+    """Blocks ad/tracker domains before they hit the network.
+
+    Thread-safety note: ``interceptRequest`` is called from Qt's network
+    thread.  ``_enabled``, ``_blocked_count``, and ``_allowlist`` are read/
+    written from both the UI thread and the network thread.  The operations
+    are all atomic at the Python GIL level, which is sufficient here.
+    """
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._enabled: bool = True
         self._blocked_count: int = 0
+        self._allowlist: set[str] = set()
 
-    # ------------------------------------------------------------------
-    # QWebEngineUrlRequestInterceptor override
-    # ------------------------------------------------------------------
+    # ── QWebEngineUrlRequestInterceptor override ───────────────────────
 
     def interceptRequest(self, info: QWebEngineUrlRequestInfo) -> None:
         if not self._enabled:
             return
         host = _extract_host(info.requestUrl().toString())
-        if host and _is_blocked(host):
+        if not host:
+            return
+        if _is_allowed(host, frozenset(self._allowlist)):
+            return
+        if _is_blocked(host, _BLOCKLIST):
             info.block(True)
             self._blocked_count += 1
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    # ── Public API ─────────────────────────────────────────────────────
 
     @property
     def enabled(self) -> bool:
@@ -290,3 +156,17 @@ class AdBlockInterceptor(QWebEngineUrlRequestInterceptor):
 
     def reset_count(self) -> None:
         self._blocked_count = 0
+
+    # ── Allowlist management ───────────────────────────────────────────
+
+    def add_to_allowlist(self, domain: str) -> None:
+        """Allow *domain* and all its subdomains, bypassing the blocklist."""
+        self._allowlist.add(domain.lower().strip())
+
+    def remove_from_allowlist(self, domain: str) -> None:
+        """Remove a previous allowlist entry (silently ignored if absent)."""
+        self._allowlist.discard(domain.lower().strip())
+
+    def get_allowlist(self) -> list[str]:
+        """Return a sorted copy of the current allowlist."""
+        return sorted(self._allowlist)

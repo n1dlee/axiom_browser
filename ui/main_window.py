@@ -1,8 +1,11 @@
 import base64
+import logging
 import os
 from typing import Optional
 
 from PyQt6.QtCore import QTimer, QUrl, Qt
+
+_log = logging.getLogger(__name__)
 from PyQt6.QtGui import QCloseEvent, QKeySequence, QShortcut, QIcon, QPixmap
 from PyQt6.QtWebEngineCore import QWebEngineDownloadRequest
 from PyQt6.QtWidgets import (
@@ -53,9 +56,16 @@ class AxiomMainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self._settings = SettingsManager()
+        self._settings.load()           # load early so nav manager gets the right URL
+
         self._engine = BrowserEngine()
         self._tab_mgr = TabManager(parent=self)
-        self._nav_mgr = NavigationManager()
+        # Inject the user's preferred search engine URL at construction time
+        # so resolve_input() never silently falls back to the hard-coded default.
+        _search_url = self._settings.get(
+            "search.engine_url", "https://www.google.com/search?q={}"
+        )
+        self._nav_mgr = NavigationManager(search_url=_search_url)
         self._history = HistoryManager(db_path=_data_path("history.db"))
         self._downloads = DownloadsManager(db_path=_data_path("downloads.db"))
         self._session = SessionManager()
@@ -89,7 +99,7 @@ class AxiomMainWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────
 
     def _initialize(self) -> None:
-        self._settings.load()
+        # settings already loaded in __init__ before NavigationManager construction
         self._bookmarks.load()
 
         self._adblock = AdBlockInterceptor()
@@ -249,6 +259,11 @@ class AxiomMainWindow(QMainWindow):
                 # Don't restore special tabs — open home page instead
                 url = ts.url if ts.url not in _SPECIAL_URLS else self._settings.get("startup.home_url", "https://www.google.com")
                 tab_id = self._tab_mgr.create_tab(url)
+                # Restore the saved title immediately so the tab strip is
+                # readable before the page finishes loading (async title
+                # updates from the engine will overwrite this once loaded).
+                if ts.title:
+                    self._tab_bar.update_tab_title(tab_id, ts.title)
                 self._tab_mgr.switch_to(tab_id)
                 self._tab_bar.set_active_tab(tab_id)
                 if ts.is_active:
@@ -649,6 +664,8 @@ class AxiomMainWindow(QMainWindow):
 
     def _on_search_engine_changed(self, url: str) -> None:
         self._settings.set("search.engine_url", url)
+        # Keep NavigationManager in sync so searches use the new engine immediately.
+        self._nav_mgr.set_search_url(url)
 
     def _on_restore_session_toggled(self, enabled: bool) -> None:
         self._settings.set("startup.restore_session", enabled)
@@ -714,11 +731,19 @@ class AxiomMainWindow(QMainWindow):
         ]
         try:
             self._session.save_session(sessions)
-        except Exception:
-            pass
+        except OSError as exc:
+            # Non-fatal: log so it shows up in crash reports / log files.
+            # Don't block the close — the user expects the window to close.
+            _log.error("Failed to save session to disk: %s", exc)
+
         self._history.close()
         self._downloads.close()
+
         self._settings.set("window.width", self.width())
         self._settings.set("window.height", self.height())
-        self._settings.save()
+        try:
+            self._settings.save()
+        except OSError as exc:
+            _log.error("Failed to save settings to disk: %s", exc)
+
         event.accept()

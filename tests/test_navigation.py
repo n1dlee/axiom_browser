@@ -1,11 +1,13 @@
 import pytest
-from core.navigation import NavigationManager
+from core.navigation import NavigationManager, _DEFAULT_SEARCH_URL
 
 
 @pytest.fixture
 def nav() -> NavigationManager:
     return NavigationManager()
 
+
+# ── URL resolution (default Google engine) ────────────────────────────────────
 
 def test_resolve_full_url(nav: NavigationManager) -> None:
     assert nav.resolve_input("https://example.com") == "https://example.com"
@@ -98,3 +100,51 @@ def test_remove_tab_cleans_up(nav: NavigationManager) -> None:
 
 def test_remove_nonexistent_tab_no_error(nav: NavigationManager) -> None:
     nav.remove_tab(999)  # must not raise
+
+
+# ── Custom search engine ───────────────────────────────────────────────────────
+
+def test_custom_search_url_at_construction() -> None:
+    """Search queries use the injected template, not the hard-coded Google URL."""
+    custom = NavigationManager(search_url="https://duckduckgo.com/?q={}")
+    result = custom.resolve_input("axiom browser")
+    assert "duckduckgo.com" in result
+    assert "google.com" not in result
+
+
+def test_custom_search_url_encodes_query() -> None:
+    custom = NavigationManager(search_url="https://search.example.com/q?q={}")
+    result = custom.resolve_input("hello world")
+    assert "search.example.com" in result
+    assert "hello" in result
+    assert " " not in result
+
+
+def test_set_search_url_updates_at_runtime(nav: NavigationManager) -> None:
+    """set_search_url() takes effect immediately for subsequent queries."""
+    nav.set_search_url("https://bing.com/search?q={}")
+    result = nav.resolve_input("python asyncio")
+    assert "bing.com" in result
+    assert "google.com" not in result
+
+
+def test_invalid_search_url_fallback_to_google() -> None:
+    """A template without '{}' must fall back to Google and not raise."""
+    bad = NavigationManager(search_url="https://bad.example.com/no-placeholder")
+    result = bad.resolve_input("test query")
+    # Falls back to Google default
+    assert "google.com/search" in result
+
+
+def test_invalid_set_search_url_fallback(nav: NavigationManager) -> None:
+    """set_search_url() with a bad template falls back without raising."""
+    nav.set_search_url("https://broken.example.com/")
+    result = nav.resolve_input("fallback test")
+    assert "google.com/search" in result
+
+
+def test_custom_search_url_does_not_affect_domain_resolution() -> None:
+    """Bare domains still resolve to https://, regardless of search engine."""
+    custom = NavigationManager(search_url="https://duckduckgo.com/?q={}")
+    assert custom.resolve_input("example.com") == "https://example.com"
+    assert custom.resolve_input("https://python.org") == "https://python.org"

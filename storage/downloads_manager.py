@@ -6,11 +6,11 @@ from typing import Optional
 
 
 class DownloadStatus(Enum):
-    PENDING = "pending"
+    PENDING     = "pending"
     IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
+    COMPLETED   = "completed"
+    FAILED      = "failed"
+    CANCELLED   = "cancelled"
 
 
 @dataclass
@@ -36,6 +36,10 @@ class DownloadsManager:
             timestamp  REAL NOT NULL
         )
     """
+    _INDEX_SQL = [
+        "CREATE INDEX IF NOT EXISTS idx_downloads_timestamp ON downloads(timestamp)",
+        "CREATE INDEX IF NOT EXISTS idx_downloads_status    ON downloads(status)",
+    ]
 
     def __init__(self, db_path: str = ":memory:") -> None:
         self._db_path = db_path
@@ -43,7 +47,13 @@ class DownloadsManager:
 
     def connect(self) -> None:
         self._conn = sqlite3.connect(self._db_path)
+        # WAL mode: readers don't block writers; safer for concurrent access.
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        # Retry for up to 5 s before raising OperationalError on lock contention.
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute(self._CREATE_SQL)
+        for idx_sql in self._INDEX_SQL:
+            self._conn.execute(idx_sql)
         self._conn.commit()
 
     def add_download(
