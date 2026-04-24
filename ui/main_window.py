@@ -1,11 +1,10 @@
 import base64
 import logging
 import os
+from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import QTimer, QUrl, Qt
-
-_log = logging.getLogger(__name__)
+from PyQt6.QtCore import QBuffer, QIODeviceBase, QTimer, QUrl, Qt
 from PyQt6.QtGui import QCloseEvent, QKeySequence, QShortcut, QIcon, QPixmap
 from PyQt6.QtWebEngineCore import QWebEngineDownloadRequest
 from PyQt6.QtWidgets import (
@@ -20,7 +19,7 @@ from storage.cache_manager import CacheManager
 from storage.history_manager import HistoryManager
 from storage.downloads_manager import DownloadsManager, DownloadStatus
 from storage.session_manager import SessionManager, TabSession
-from storage.bookmarks_manager import BookmarksManager, Bookmark
+from storage.bookmarks_manager import BookmarksManager
 from system.settings_manager import SettingsManager
 from system.resource_manager import ResourceManager
 from ui.tab_bar import AxiomTabBar
@@ -34,6 +33,10 @@ from ui.downloads_page import AxiomDownloadsPage
 from ui.download_bar import AxiomDownloadBar
 from ui.sidebar import AxiomSidebar
 from ui.theme import build_global_qss, BG
+from ui.newtab_page import generate_newtab_html
+
+_log = logging.getLogger(__name__)
+_ICON_PATH = Path(__file__).parent.parent / "assets" / "axiom.png"
 
 _SPECIAL_URLS = frozenset({"axiom://settings", "axiom://history", "axiom://downloads"})
 
@@ -132,6 +135,8 @@ class AxiomMainWindow(QMainWindow):
 
     def _setup_ui(self) -> None:
         self.setWindowTitle("AXIOM")
+        if _ICON_PATH.exists():
+            self.setWindowIcon(QIcon(str(_ICON_PATH)))
         self.resize(
             self._settings.get("window.width", 1280),
             self._settings.get("window.height", 820),
@@ -233,6 +238,10 @@ class AxiomMainWindow(QMainWindow):
         self._bookmarks_bar.navigate_requested.connect(self._on_navigate)
         self._bookmarks_bar.bookmark_removed.connect(self._on_bookmark_removed)
         self._bookmarks_bar.add_bookmark_requested.connect(self._add_current_bookmark)
+        self._bookmarks_bar.add_to_folder_requested.connect(self._on_add_to_folder_requested)
+        self._bookmarks_bar.folder_created.connect(self._on_folder_created)
+        self._bookmarks_bar.folder_deleted.connect(self._on_folder_deleted)
+        self._bookmarks_bar.folder_renamed.connect(self._on_folder_renamed)
 
         # Download bar
         self._download_bar.open_downloads_page.connect(self._on_downloads_requested)
@@ -294,13 +303,19 @@ class AxiomMainWindow(QMainWindow):
     def _create_special_view(self, tab_id: int, url: str) -> QWidget:
         """Create the appropriate widget for an axiom:// URL."""
         if url == "axiom://settings":
-            page: QWidget = AxiomSettingsPage(self._adblock, self._settings, parent=self._stack)
+            page: QWidget = AxiomSettingsPage(
+                self._adblock, self._settings, self._bookmarks,
+                parent=self._stack,
+            )
             assert isinstance(page, AxiomSettingsPage)
             page.home_url_changed.connect(self._on_home_url_changed)
             page.search_engine_changed.connect(self._on_search_engine_changed)
             page.adblock_toggled.connect(self._on_adblock_toggled)
             page.restore_session_toggled.connect(self._on_restore_session_toggled)
             page.bookmarks_bar_toggled.connect(self._on_bookmarks_bar_toggled)
+            page.bookmarks_imported.connect(self._on_bookmarks_imported)
+            page.background_path_changed.connect(self._on_background_path_changed)
+            page.theme_preset_changed.connect(self._on_theme_preset_changed)
             self._settings_page = page
             title = "Settings"
 
@@ -396,7 +411,8 @@ class AxiomMainWindow(QMainWindow):
                 view.refresh()
         else:
             url = self._nav_mgr.get_current_url(tab_id) or ""
-            self._address_bar.update_url(url)
+            display_url = "" if url.startswith("data:") else url
+            self._address_bar.update_url(display_url)
             self._update_nav_buttons(tab_id)
             view = self._views[tab_id]
             if self._devtools_panel.is_open() and isinstance(view, AxiomContentView):
@@ -433,10 +449,13 @@ class AxiomMainWindow(QMainWindow):
         self._tab_mgr.close_tab(tab_id)
 
     def _on_new_tab_requested(self) -> None:
-        home = self._settings.get("startup.home_url", "https://www.google.com")
-        tab_id = self._tab_mgr.create_tab(home)
+        tab_id = self._tab_mgr.create_tab("")
         self._tab_mgr.switch_to(tab_id)
         self._tab_bar.set_active_tab(tab_id)
+        # Inject the custom new-tab HTML into the freshly created view
+        view = self._views.get(tab_id)
+        if isinstance(view, AxiomContentView):
+            view.setHtml(self._build_newtab_html())
 
     def _close_active_tab(self) -> None:
         active_id = self._tab_mgr.get_active_tab_id()
@@ -546,9 +565,11 @@ class AxiomMainWindow(QMainWindow):
         url_str = url.toString()
         self._nav_mgr.set_current_url(tab_id, url_str)
         if tab_id == self._tab_mgr.get_active_tab_id():
-            self._address_bar.update_url(url_str)
+            # Show empty in the address bar for injected new-tab pages (data: URLs)
+            display_url = "" if url_str.startswith("data:") else url_str
+            self._address_bar.update_url(display_url)
             self._update_nav_buttons(tab_id)
-        if url_str and url_str != "about:blank":
+        if url_str and url_str not in ("about:blank", "") and not url_str.startswith("data:"):
             tab = self._tab_mgr.get_tab(tab_id)
             self._history.add_entry(url_str, tab.title if tab else "")
 
@@ -580,38 +601,95 @@ class AxiomMainWindow(QMainWindow):
     # Bookmarks
     # ──────────────────────────────────────────────────────────────────
 
+    def _build_newtab_html(self) -> str:
+        """Assemble the new-tab page HTML using current settings."""
+        return generate_newtab_html(
+            self._bookmarks.get_flat(),
+            background_path=self._settings.get("theme.background_path", ""),
+            preset=self._settings.get("theme.preset", "Neo Noir"),
+            search_url=self._settings.get("search.engine_url",
+                                          "https://www.google.com/search?q={}"),
+        )
+
+    def _on_background_path_changed(self, path: str) -> None:
+        self._settings.set("theme.background_path", path)
+
+    def _on_theme_preset_changed(self, preset: str) -> None:
+        self._settings.set("theme.preset", preset)
+
+    def _on_bookmarks_imported(self, added: list) -> None:
+        """Called after Chrome/HTML import — reload the bar with all items."""
+        if added:
+            self._bookmarks_bar.load_bookmarks(self._bookmarks.get_all())
+            if not self._bookmarks_bar.isVisible():
+                self._on_bookmarks_bar_toggled(True)
+
     def _on_bookmark_removed(self, url: str) -> None:
         self._bookmarks.remove(url)
 
+    # ── Folder handlers ───────────────────────────────────────────────
+
+    def _on_folder_created(self, title: str) -> None:
+        self._bookmarks.add_folder(title)
+        self._bookmarks_bar.load_bookmarks(self._bookmarks.get_all())
+
+    def _on_folder_deleted(self, title: str) -> None:
+        self._bookmarks.remove_folder(title)
+        self._bookmarks_bar.load_bookmarks(self._bookmarks.get_all())
+
+    def _on_folder_renamed(self, old_title: str, new_title: str) -> None:
+        self._bookmarks.rename_folder(old_title, new_title)
+        self._bookmarks_bar.load_bookmarks(self._bookmarks.get_all())
+
+    def _on_add_to_folder_requested(self, folder_title: str) -> None:
+        """Add the currently active page as a bookmark inside the named folder."""
+        url, title, view = self._active_page_info()
+        if not url:
+            return
+        self._bookmarks.add(url, title, self._capture_favicon(view), folder_title=folder_title)
+        self._bookmarks_bar.load_bookmarks(self._bookmarks.get_all())
+
     def _add_current_bookmark(self) -> None:
-        active_id = self._tab_mgr.get_active_tab_id()
-        if active_id is None:
+        url, title, view = self._active_page_info()
+        if not url:
             return
-        view = self._views.get(active_id)
-        if not isinstance(view, AxiomContentView):
-            return
-        url = self._nav_mgr.get_current_url(active_id) or view.url().toString()
-        if not url or url == "about:blank":
-            return
-        tab = self._tab_mgr.get_tab(active_id)
-        title = tab.title if tab else url
-
-        favicon_b64 = ""
-        icon: QIcon = view.icon()
-        if not icon.isNull():
-            px: QPixmap = icon.pixmap(16, 16)
-            if not px.isNull():
-                from PyQt6.QtCore import QBuffer, QIODeviceBase
-                buf = QBuffer()
-                buf.open(QIODeviceBase.OpenModeFlag.WriteOnly)
-                px.save(buf, "PNG")
-                favicon_b64 = base64.b64encode(bytes(buf.data())).decode("ascii")
-
-        self._bookmarks.add(url, title, favicon_b64)
-        self._bookmarks_bar.add_bookmark(Bookmark(url=url, title=title, favicon_b64=favicon_b64))
-
+        self._bookmarks.add(url, title, self._capture_favicon(view))
+        self._bookmarks_bar.load_bookmarks(self._bookmarks.get_all())
         if not self._bookmarks_bar.isVisible():
             self._on_bookmarks_bar_toggled(True)
+
+    # ── Bookmark helpers ──────────────────────────────────────────────
+
+    def _active_page_info(self) -> tuple[str, str, Optional["AxiomContentView"]]:
+        """Return (url, title, view) for the active tab, or ("", "", None) if unavailable."""
+        active_id = self._tab_mgr.get_active_tab_id()
+        if active_id is None:
+            return "", "", None
+        view = self._views.get(active_id)
+        if not isinstance(view, AxiomContentView):
+            return "", "", None
+        url = self._nav_mgr.get_current_url(active_id) or view.url().toString()
+        if not url or url in ("about:blank", "") or url.startswith("data:"):
+            return "", "", None
+        tab = self._tab_mgr.get_tab(active_id)
+        title = (tab.title if tab else None) or url
+        return url, title, view
+
+    @staticmethod
+    def _capture_favicon(view: Optional["AxiomContentView"]) -> str:
+        """Return a base64-encoded PNG favicon from the view's current icon, or ''."""
+        if view is None:
+            return ""
+        icon: QIcon = view.icon()
+        if icon.isNull():
+            return ""
+        px: QPixmap = icon.pixmap(16, 16)
+        if px.isNull():
+            return ""
+        buf = QBuffer()
+        buf.open(QIODeviceBase.OpenModeFlag.WriteOnly)
+        px.save(buf, "PNG")
+        return base64.b64encode(bytes(buf.data())).decode("ascii")
 
     def _toggle_bookmarks_bar(self) -> None:
         self._on_bookmarks_bar_toggled(not self._bookmarks_bar.isVisible())

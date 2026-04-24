@@ -6,13 +6,15 @@ from typing import Optional
 
 from PyQt6.QtCore import pyqtSignal, Qt, QObject
 from PyQt6.QtWidgets import (
-    QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
+    QWidget, QHBoxLayout, QVBoxLayout, QGridLayout, QLabel, QPushButton,
     QLineEdit, QCheckBox, QFrame, QScrollArea, QStackedWidget,
-    QSizePolicy, QComboBox,
+    QSizePolicy, QComboBox, QFileDialog, QMessageBox,
 )
 
 from core.adblock import AdBlockInterceptor
+from storage.bookmarks_manager import BookmarksManager, Bookmark
 from system.settings_manager import SettingsManager
+from ui.newtab_page import PRESET_THEMES
 from ui.theme import (
     BG, SURFACE_0, SURFACE_1, SURFACE_2, SURFACE_3,
     BORDER_FAINT, BORDER_MED, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY,
@@ -375,12 +377,46 @@ class _AdblockSection(QWidget):
         self._count_lbl.setText(str(self._interceptor.blocked_count))
 
 
+class _ThemeCard(QPushButton):
+    """A clickable theme preview card showing gradient + accent colour."""
+
+    _CARD_QSS = """
+    QPushButton {{
+        background: {gradient};
+        border: 2px solid {border};
+        border-radius: 10px;
+        color: rgba(255,255,255,0.90);
+        font-size: 11px; font-weight: 500;
+        text-align: center;
+        padding: 0;
+    }}
+    QPushButton:hover {{ border-color: rgba(255,255,255,0.35); }}
+    """
+
+    def __init__(self, name: str, gradient: str, accent: str, parent=None):
+        super().__init__(parent)
+        self._name     = name
+        self._gradient = gradient
+        self._accent   = accent
+        self.setFixedSize(160, 64)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setText(name)
+        self.setSelected(False)
+
+    def setSelected(self, selected: bool) -> None:
+        border = self._accent if selected else "rgba(255,255,255,0.10)"
+        self.setStyleSheet(self._CARD_QSS.format(gradient=self._gradient, border=border))
+
+
 class _AppearanceSection(QWidget):
-    bookmarks_bar_toggled = pyqtSignal(bool)
+    bookmarks_bar_toggled   = pyqtSignal(bool)
+    background_path_changed = pyqtSignal(str)   # absolute path or "" to clear
+    theme_preset_changed    = pyqtSignal(str)   # preset name
 
     def __init__(self, settings: SettingsManager, parent=None):
         super().__init__(parent)
         self._settings = settings
+        self._theme_cards: list[_ThemeCard] = []
         self._build()
 
     def _build(self):
@@ -393,22 +429,294 @@ class _AppearanceSection(QWidget):
         heading.setObjectName("section-heading")
         layout.addWidget(heading)
 
+        # ── Bookmarks bar toggle ──────────────────────────────────────
         bm_row = _row("Show bookmarks bar", "Display pinned bookmarks below the toolbar.")
         self._bm_cb = QCheckBox()
         self._bm_cb.setChecked(self._settings.get("bookmarks_bar_visible", True))
         bm_row.layout().addWidget(self._bm_cb)
+        layout.addWidget(_card(bm_row))
 
-        theme_row = _row("Theme", "AXIOM Dark — Neo-Future Edition")
+        # ── Theme presets ─────────────────────────────────────────────
+        theme_lbl = QLabel("NEW TAB THEME")
+        theme_lbl.setObjectName("subsection-heading")
+        layout.addWidget(theme_lbl)
 
-        layout.addWidget(_card(bm_row, theme_row))
+        theme_card = QWidget()
+        theme_card.setObjectName("card")
+        theme_v = QVBoxLayout(theme_card)
+        theme_v.setContentsMargins(20, 16, 20, 16)
+        theme_v.setSpacing(10)
+
+        theme_desc = QLabel(
+            "Sets the colour scheme for new tab pages. "
+            "A custom background image overrides the gradient."
+        )
+        theme_desc.setObjectName("row-desc")
+        theme_desc.setWordWrap(True)
+        theme_v.addWidget(theme_desc)
+
+        # Build grid — 3 cards per row
+        grid = QGridLayout()
+        grid.setSpacing(10)
+        current_preset = self._settings.get("theme.preset", "Neo Noir")
+        col_count = 3
+        for idx, (name, props) in enumerate(PRESET_THEMES.items()):
+            card = _ThemeCard(name, props["gradient"], props["accent"])
+            card.setSelected(name == current_preset)
+            card.clicked.connect(lambda _, n=name: self._on_preset_clicked(n))
+            grid.addWidget(card, idx // col_count, idx % col_count)
+            self._theme_cards.append(card)
+
+        theme_v.addLayout(grid)
+        layout.addWidget(theme_card)
+
+        # ── New Tab background image ──────────────────────────────────
+        bg_lbl = QLabel("CUSTOM BACKGROUND IMAGE")
+        bg_lbl.setObjectName("subsection-heading")
+        layout.addWidget(bg_lbl)
+
+        bg_card = QWidget()
+        bg_card.setObjectName("card")
+        bg_v = QVBoxLayout(bg_card)
+        bg_v.setContentsMargins(20, 14, 20, 14)
+        bg_v.setSpacing(8)
+
+        bg_desc = QLabel(
+            "Choose an image to display on every new tab (JPG, PNG, WEBP, GIF). "
+            "Overrides the theme gradient above. Leave empty to use the theme gradient."
+        )
+        bg_desc.setObjectName("row-desc")
+        bg_desc.setWordWrap(True)
+        bg_v.addWidget(bg_desc)
+
+        current_path = self._settings.get("theme.background_path", "")
+        self._bg_path_lbl = QLabel(current_path or "No image selected")
+        self._bg_path_lbl.setObjectName("row-desc")
+        self._bg_path_lbl.setWordWrap(True)
+        bg_v.addWidget(self._bg_path_lbl)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        pick_btn = QPushButton("Choose image\u2026")
+        pick_btn.setObjectName("primary-btn")
+        pick_btn.setFixedWidth(150)
+        pick_btn.clicked.connect(self._pick_background)
+
+        clear_btn = QPushButton("Clear")
+        clear_btn.setObjectName("danger-btn")
+        clear_btn.setFixedWidth(80)
+        clear_btn.clicked.connect(self._clear_background)
+
+        btn_row.addWidget(pick_btn)
+        btn_row.addWidget(clear_btn)
+        btn_row.addStretch(1)
+        bg_v.addLayout(btn_row)
+        layout.addWidget(bg_card)
+
         layout.addStretch(1)
 
         self._bm_cb.toggled.connect(self.bookmarks_bar_toggled)
+
+    def _on_preset_clicked(self, name: str) -> None:
+        for card in self._theme_cards:
+            card.setSelected(card._name == name)
+        self.theme_preset_changed.emit(name)
+
+    def _pick_background(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose background image", "",
+            "Images (*.png *.jpg *.jpeg *.webp *.gif);;All Files (*)"
+        )
+        if path:
+            self._bg_path_lbl.setText(path)
+            self.background_path_changed.emit(path)
+
+    def _clear_background(self):
+        self._bg_path_lbl.setText("No image selected")
+        self.background_path_changed.emit("")
 
     def refresh(self, bookmarks_visible: bool):
         self._bm_cb.blockSignals(True)
         self._bm_cb.setChecked(bookmarks_visible)
         self._bm_cb.blockSignals(False)
+        current = self._settings.get("theme.background_path", "")
+        self._bg_path_lbl.setText(current or "No image selected")
+        current_preset = self._settings.get("theme.preset", "Neo Noir")
+        for card in self._theme_cards:
+            card.setSelected(card._name == current_preset)
+
+
+class _BookmarksSection(QWidget):
+    bookmarks_imported = pyqtSignal(list)   # emits list[Bookmark] after any import
+
+    def __init__(self, bookmarks_mgr: BookmarksManager, parent=None):
+        super().__init__(parent)
+        self._mgr = bookmarks_mgr
+        self._build()
+
+    def _build(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(16)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        heading = QLabel("Bookmarks")
+        heading.setObjectName("section-heading")
+        layout.addWidget(heading)
+
+        # ── Import from Chrome ────────────────────────────────────────
+        chrome_lbl = QLabel("IMPORT FROM CHROME")
+        chrome_lbl.setObjectName("subsection-heading")
+        layout.addWidget(chrome_lbl)
+
+        chrome_card = QWidget()
+        chrome_card.setObjectName("card")
+        chrome_v = QVBoxLayout(chrome_card)
+        chrome_v.setContentsMargins(20, 14, 20, 14)
+        chrome_v.setSpacing(8)
+
+        chrome_desc = QLabel(
+            "Reads Chrome's local bookmarks file directly — no login required.\n"
+            "Duplicates are skipped automatically."
+        )
+        chrome_desc.setObjectName("row-desc")
+        chrome_desc.setWordWrap(True)
+        chrome_v.addWidget(chrome_desc)
+
+        self._chrome_status = QLabel("")
+        self._chrome_status.setObjectName("row-desc")
+        self._chrome_status.setWordWrap(True)
+        chrome_v.addWidget(self._chrome_status)
+
+        chrome_btn = QPushButton("Import from Chrome")
+        chrome_btn.setObjectName("primary-btn")
+        chrome_btn.setFixedWidth(180)
+        chrome_btn.clicked.connect(self._on_import_chrome)
+        chrome_v.addWidget(chrome_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        layout.addWidget(chrome_card)
+
+        # ── Import from HTML ──────────────────────────────────────────
+        html_lbl = QLabel("IMPORT FROM HTML FILE")
+        html_lbl.setObjectName("subsection-heading")
+        layout.addWidget(html_lbl)
+
+        html_card = QWidget()
+        html_card.setObjectName("card")
+        html_v = QVBoxLayout(html_card)
+        html_v.setContentsMargins(20, 14, 20, 14)
+        html_v.setSpacing(8)
+
+        html_desc = QLabel(
+            "Supports the standard Netscape Bookmark Format exported by\n"
+            "Chrome, Firefox, Edge, and Safari."
+        )
+        html_desc.setObjectName("row-desc")
+        html_desc.setWordWrap(True)
+        html_v.addWidget(html_desc)
+
+        self._html_status = QLabel("")
+        self._html_status.setObjectName("row-desc")
+        self._html_status.setWordWrap(True)
+        html_v.addWidget(self._html_status)
+
+        html_btn = QPushButton("Choose HTML file…")
+        html_btn.setObjectName("action-btn")
+        html_btn.setFixedWidth(180)
+        html_btn.clicked.connect(self._on_import_html)
+        html_v.addWidget(html_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        layout.addWidget(html_card)
+
+        # ── Export to HTML ────────────────────────────────────────────
+        export_lbl = QLabel("EXPORT")
+        export_lbl.setObjectName("subsection-heading")
+        layout.addWidget(export_lbl)
+
+        export_card = QWidget()
+        export_card.setObjectName("card")
+        export_v = QVBoxLayout(export_card)
+        export_v.setContentsMargins(20, 14, 20, 14)
+        export_v.setSpacing(8)
+
+        export_desc = QLabel(
+            "Save all AXIOM bookmarks as an HTML file that any browser can import."
+        )
+        export_desc.setObjectName("row-desc")
+        export_desc.setWordWrap(True)
+        export_v.addWidget(export_desc)
+
+        self._export_status = QLabel("")
+        self._export_status.setObjectName("row-desc")
+        self._export_status.setWordWrap(True)
+        export_v.addWidget(self._export_status)
+
+        export_btn = QPushButton("Export bookmarks…")
+        export_btn.setObjectName("action-btn")
+        export_btn.setFixedWidth(180)
+        export_btn.clicked.connect(self._on_export_html)
+        export_v.addWidget(export_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        layout.addWidget(export_card)
+        layout.addStretch(1)
+
+    # ── Slots ──────────────────────────────────────────────────────────
+
+    def _on_import_chrome(self):
+        self._chrome_status.setText("")
+        try:
+            added = self._mgr.import_from_chrome()
+            if added:
+                self._chrome_status.setStyleSheet(f"color: #32D74B;")
+                self._chrome_status.setText(f"✓ Imported {len(added)} new bookmarks from Chrome.")
+                self.bookmarks_imported.emit(added)
+            else:
+                self._chrome_status.setStyleSheet(f"color: {TEXT_SECONDARY};")
+                self._chrome_status.setText("No new bookmarks found — all already exist in AXIOM.")
+        except FileNotFoundError as exc:
+            self._chrome_status.setStyleSheet(f"color: #FF453A;")
+            self._chrome_status.setText(str(exc))
+        except Exception as exc:
+            self._chrome_status.setStyleSheet(f"color: #FF453A;")
+            self._chrome_status.setText(f"Error: {exc}")
+
+    def _on_import_html(self):
+        self._html_status.setText("")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Bookmarks HTML", "",
+            "HTML Bookmark Files (*.html *.htm);;All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            added = self._mgr.import_from_html(path)
+            if added:
+                self._html_status.setStyleSheet(f"color: #32D74B;")
+                self._html_status.setText(f"✓ Imported {len(added)} new bookmarks.")
+                self.bookmarks_imported.emit(added)
+            else:
+                self._html_status.setStyleSheet(f"color: {TEXT_SECONDARY};")
+                self._html_status.setText("No new bookmarks found — all already exist in AXIOM.")
+        except Exception as exc:
+            self._html_status.setStyleSheet(f"color: #FF453A;")
+            self._html_status.setText(f"Error reading file: {exc}")
+
+    def _on_export_html(self):
+        self._export_status.setText("")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Bookmarks", "axiom_bookmarks.html",
+            "HTML Files (*.html);;All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            count = self._mgr.export_to_html(path)
+            self._export_status.setStyleSheet(f"color: #32D74B;")
+            self._export_status.setText(f"✓ Exported {count} bookmarks to {path}")
+        except Exception as exc:
+            self._export_status.setStyleSheet(f"color: #FF453A;")
+            self._export_status.setText(f"Error: {exc}")
 
 
 class _ShortcutsSection(QWidget):
@@ -504,16 +812,20 @@ class _AboutSection(QWidget):
 
 class AxiomSettingsPage(QWidget):
     # Signals that main_window listens to
-    home_url_changed          = pyqtSignal(str)
-    search_engine_changed     = pyqtSignal(str)
-    adblock_toggled           = pyqtSignal(bool)
-    restore_session_toggled   = pyqtSignal(bool)
-    bookmarks_bar_toggled     = pyqtSignal(bool)
+    home_url_changed           = pyqtSignal(str)
+    search_engine_changed      = pyqtSignal(str)
+    adblock_toggled            = pyqtSignal(bool)
+    restore_session_toggled    = pyqtSignal(bool)
+    bookmarks_bar_toggled      = pyqtSignal(bool)
+    bookmarks_imported         = pyqtSignal(list)   # list[Bookmark]
+    background_path_changed    = pyqtSignal(str)    # new tab background image path
+    theme_preset_changed       = pyqtSignal(str)    # preset name
 
     def __init__(
         self,
         interceptor: AdBlockInterceptor,
         settings_mgr: SettingsManager,
+        bookmarks_mgr: Optional[BookmarksManager] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -521,6 +833,7 @@ class AxiomSettingsPage(QWidget):
         self.setStyleSheet(_PAGE_QSS)
         self._interceptor = interceptor
         self._settings = settings_mgr
+        self._bookmarks_mgr = bookmarks_mgr
         self._nav_btns: list[QPushButton] = []
         self._setup_ui()
 
@@ -545,7 +858,7 @@ class AxiomSettingsPage(QWidget):
         )
         nav_layout.addWidget(title)
 
-        sections = ["General", "Adblock", "Appearance", "Shortcuts", "About"]
+        sections = ["General", "Adblock", "Appearance", "Bookmarks", "Shortcuts", "About"]
         for i, name in enumerate(sections):
             btn = QPushButton(name)
             btn.setObjectName("nav-item")
@@ -568,16 +881,17 @@ class AxiomSettingsPage(QWidget):
         root.addWidget(vline)
 
         # ── Right content stack ───────────────────────────────────
-        self._general   = _GeneralSection(self._settings)
-        self._adblock_s = _AdblockSection(self._interceptor)
+        self._general    = _GeneralSection(self._settings)
+        self._adblock_s  = _AdblockSection(self._interceptor)
         self._appearance = _AppearanceSection(self._settings)
-        self._shortcuts = _ShortcutsSection()
-        self._about     = _AboutSection()
+        self._bm_section = _BookmarksSection(self._bookmarks_mgr) if self._bookmarks_mgr else QWidget()
+        self._shortcuts  = _ShortcutsSection()
+        self._about      = _AboutSection()
 
         self._stack = QStackedWidget()
         for section in (
             self._general, self._adblock_s, self._appearance,
-            self._shortcuts, self._about
+            self._bm_section, self._shortcuts, self._about
         ):
             self._stack.addWidget(_scroll_wrap(section))
 
@@ -589,6 +903,10 @@ class AxiomSettingsPage(QWidget):
         self._general.restore_session_toggled.connect(self.restore_session_toggled)
         self._adblock_s.adblock_toggled.connect(self.adblock_toggled)
         self._appearance.bookmarks_bar_toggled.connect(self.bookmarks_bar_toggled)
+        self._appearance.background_path_changed.connect(self.background_path_changed)
+        self._appearance.theme_preset_changed.connect(self.theme_preset_changed)
+        if isinstance(self._bm_section, _BookmarksSection):
+            self._bm_section.bookmarks_imported.connect(self.bookmarks_imported)
 
         self._switch(0)
 

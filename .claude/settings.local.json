@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(py -3 -m venv .venv)",
+      "PowerShell(py --version)",
+      "PowerShell(python --version)",
+      "PowerShell(python3 --version)",
+      "PowerShell(Get-ChildItem -Path \"D:\\\\Files\\\\Python Projects\\\\axiom_browser\" -Recurse -Directory | Where-Object { $_.Name -eq \"__pycache__\" -or $_.Name -eq \".pytest_cache\" } | Select-Object FullName)",
+      "PowerShell(New-Item -ItemType Directory -Path \"D:\\\\Files\\\\Python Projects\\\\axiom_browser\\\\assets\" -Force)",
+      "PowerShell(Move-Item \"D:\\\\Files\\\\Python Projects\\\\axiom_browser\\\\ui\\\\axiom.png\" \"D:\\\\Files\\\\Python Projects\\\\axiom_browser\\\\assets\\\\axiom.png\")",
+      "Bash(.venv\\\\Scripts\\\\python.exe -c \"import PyQt6; print\\(PyQt6.__version__\\)\")",
+      "Bash(.venv\\\\Scripts\\\\pip list *)",
+      "Bash(findstr -i \"pyqt\\\\|qt\")"
+    ]
+  }
+}

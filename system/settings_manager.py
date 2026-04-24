@@ -27,6 +27,10 @@ DEFAULT_SETTINGS: dict = {
     },
     "bookmarks_bar_visible": True,
     "adblock_enabled": True,
+    "theme": {
+        "background_path": "",   # absolute path to a user-chosen image, empty = default gradient
+        "preset": "Neo Noir",    # name of the built-in new-tab colour theme
+    },
 }
 
 
