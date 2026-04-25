@@ -1,7 +1,10 @@
 import json
+import logging
 import os
 from copy import deepcopy
 from typing import Any, Optional
+
+_log = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS: dict = {
     "window": {
@@ -54,8 +57,16 @@ class SettingsManager:
             with open(self._path, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             self._deep_merge(self._data, saved)
-        except (json.JSONDecodeError, IOError):
-            pass
+        except json.JSONDecodeError as exc:
+            _log.warning(
+                "Settings file %s is corrupted (JSON error: %s) — using defaults.",
+                self._path, exc,
+            )
+        except OSError as exc:
+            _log.warning(
+                "Could not read settings from %s: %s — using defaults.",
+                self._path, exc,
+            )
 
     def save(self) -> None:
         os.makedirs(os.path.dirname(self._path), exist_ok=True)

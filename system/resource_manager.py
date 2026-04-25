@@ -7,14 +7,21 @@ import psutil
 if TYPE_CHECKING:
     from core.tab_manager import TabManager
 
+# Fallback defaults — overridden at construction time by SettingsManager values.
 SUSPENSION_IDLE_SECONDS: int = 300
 MEMORY_THRESHOLD_PERCENT: float = 80.0
 
 
 class ResourceManager:
-    def __init__(self, tab_manager: "TabManager", threshold: float = MEMORY_THRESHOLD_PERCENT) -> None:
+    def __init__(
+        self,
+        tab_manager: "TabManager",
+        threshold: float = MEMORY_THRESHOLD_PERCENT,
+        idle_seconds: int = SUSPENSION_IDLE_SECONDS,
+    ) -> None:
         self._tab_manager = tab_manager
         self._threshold = threshold
+        self._idle_seconds = idle_seconds
 
     def get_memory_usage_percent(self) -> float:
         return psutil.virtual_memory().percent
@@ -37,7 +44,7 @@ class ResourceManager:
             if tab.suspended:
                 continue
             idle_seconds = now - tab.last_active
-            if idle_seconds > SUSPENSION_IDLE_SECONDS:
+            if idle_seconds > self._idle_seconds:
                 candidates.append((tab.tab_id, idle_seconds))
 
         candidates.sort(key=lambda x: x[1], reverse=True)

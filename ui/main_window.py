@@ -125,7 +125,15 @@ class AxiomMainWindow(QMainWindow):
         self._restore_or_new_tab()
         self._register_shortcuts()
 
-        self._resource_mgr = ResourceManager(self._tab_mgr)
+        self._resource_mgr = ResourceManager(
+            self._tab_mgr,
+            threshold=self._settings.get(
+                "performance.memory_threshold_percent", 80.0
+            ),
+            idle_seconds=self._settings.get(
+                "performance.suspend_idle_seconds", 300
+            ),
+        )
         timer = QTimer(self)
         timer.setInterval(30_000)
         timer.timeout.connect(self._check_memory_pressure)

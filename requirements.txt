@@ -1,8 +1,10 @@
 # Runtime dependencies
-PyQt6>=6.6.0
-PyQt6-WebEngine>=6.6.0
-psutil>=5.9.0
+# Upper bounds guard against silent breakage from future major releases.
+# Tested range: PyQt6/WebEngine 6.6–6.11, psutil 5.9–7.x
+PyQt6>=6.6.0,<6.12
+PyQt6-WebEngine>=6.6.0,<6.12
+psutil>=5.9.0,<8.0
 
 # Development / testing only
-pytest>=7.4.0
-pytest-qt>=4.3.0
+pytest>=7.4.0,<10.0
+pytest-qt>=4.3.0,<5.0

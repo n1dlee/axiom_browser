@@ -73,6 +73,26 @@ class HistoryManager:
         )
         return [HistoryEntry(id=r[0], url=r[1], title=r[2], timestamp=r[3]) for r in cur]
 
+    def delete_entry(self, entry_id: int) -> None:
+        """Delete a single history entry by its primary-key ID."""
+        assert self._conn is not None
+        self._conn.execute("DELETE FROM history WHERE id = ?", (entry_id,))
+        self._conn.commit()
+
+    def delete_by_domain(self, domain: str) -> int:
+        """Delete all history entries whose URL contains *domain*.
+
+        Matches both plain domain and subdomains (e.g. ``github.com`` matches
+        ``https://gist.github.com/…``).  Returns the number of rows deleted.
+        """
+        assert self._conn is not None
+        pattern = f"%{domain}%"
+        cur = self._conn.execute(
+            "DELETE FROM history WHERE url LIKE ?", (pattern,)
+        )
+        self._conn.commit()
+        return cur.rowcount
+
     def clear(self) -> None:
         assert self._conn is not None
         self._conn.execute("DELETE FROM history")
