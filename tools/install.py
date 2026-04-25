@@ -23,12 +23,18 @@ OR  run %LOCALAPPDATA%\\Programs\\Axiom\\uninstall.bat
 """
 
 import argparse
+import io
 import os
 import shutil
 import subprocess
 import sys
 import winreg
 from pathlib import Path
+
+# Force UTF-8 output so cp1251 terminals don't choke on non-ASCII chars.
+if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 ROOT    = Path(__file__).resolve().parent.parent
 DIST    = ROOT / "dist" / "Axiom"
